@@ -1,0 +1,221 @@
+name: Native RISC-V CI
+
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+    paths:
+      - build-config
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: 'Node.js repo (owner/name)'
+        default: 'nodejs/node'
+      commit:
+        description: 'Full commit SHA (empty = latest main)'
+        default: ''
+      compiler:
+        description: 'Compiler'
+        default: 'clang'
+        type: choice
+        options:
+          - clang
+          - gcc
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      repo: ${{ steps.config.outputs.repo }}
+      commit: ${{ steps.config.outputs.commit }}
+      compiler: ${{ steps.config.outputs.compiler }}
+    steps:
+      - name: Read build configuration
+        id: config
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPOSITORY: ${{ github.repository }}
+          INPUT_REPO: ${{ inputs.repo }}
+          INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_COMPILER: ${{ inputs.compiler }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "pull_request_target" ]; then
+            curl -sSf \
+              -H "Authorization: token $GH_TOKEN" \
+              -H "Accept: application/vnd.github.v3.raw" \
+              "https://api.github.com/repos/${REPOSITORY}/contents/build-config?ref=${PR_HEAD_SHA}" \
+              -o /tmp/build-config
+
+            REPO=$(grep '^repo=' /tmp/build-config | cut -d= -f2- | tr -d '[:space:]' || true)
+            COMMIT=$(grep '^commit=' /tmp/build-config | cut -d= -f2- | tr -d '[:space:]' || true)
+            COMPILER=$(grep '^compiler=' /tmp/build-config | cut -d= -f2- | tr -d '[:space:]' || true)
+          else
+            REPO="$INPUT_REPO"
+            COMMIT="$INPUT_COMMIT"
+            COMPILER="$INPUT_COMPILER"
+          fi
+
+          REPO="${REPO:-nodejs/node}"
+          COMPILER="${COMPILER:-clang}"
+
+          # Validate repo format
+          if ! printf '%s' "$REPO" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9-]*/[a-zA-Z0-9][a-zA-Z0-9._-]*$'; then
+            echo "::error::Invalid repo format: $REPO"
+            exit 1
+          fi
+
+          # Resolve latest main if no commit specified
+          if [ -z "$COMMIT" ]; then
+            if [ "$EVENT_NAME" = "pull_request_target" ]; then
+              echo "::error::Commit SHA must be specified in build-config for pull_request_target events"
+              exit 1
+            fi
+            COMMIT=$(curl -sSf \
+              -H "Authorization: token $GH_TOKEN" \
+              "https://api.github.com/repos/${REPO}/commits/main" \
+              | python3 -c "import sys,json; print(json.load(sys.stdin)['sha'])")
+            echo "Resolved latest main: $COMMIT"
+          fi
+
+          # Commit must be a full SHA-1 hash
+          if ! printf '%s' "$COMMIT" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "::error::commit must be a 40-character SHA-1 hash, got: $COMMIT"
+            exit 1
+          fi
+
+          # Validate compiler
+          case "$COMPILER" in
+            clang|gcc) ;;
+            *) echo "::error::compiler must be 'clang' or 'gcc', got: $COMPILER"; exit 1 ;;
+          esac
+
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "compiler=$COMPILER" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Build Configuration"
+            echo "| Key | Value |"
+            echo "|-----|-------|"
+            echo "| Repo | \`$REPO\` |"
+            echo "| Commit | \`$COMMIT\` |"
+            echo "| Compiler | \`$COMPILER\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: prepare
+    # Currently runs on SG2042
+    runs-on: rvv-incapable
+    env:
+      repo: ${{ needs.prepare.outputs.repo }}
+      commit: ${{ needs.prepare.outputs.commit }}
+      compiler: ${{ needs.prepare.outputs.compiler }}
+    steps:
+      - name: Prepare source tree
+        run: |
+          set -euo pipefail
+          REMOTE_URL="https://github.com/${repo}.git"
+
+          if [ ! -d "$HOME/node-riscv/.git" ]; then
+            git clone "$REMOTE_URL" "$HOME/node-riscv"
+          else
+            cd "$HOME/node-riscv"
+            git clean -xfd
+            git reset --hard HEAD
+            CURRENT=$(git remote get-url origin)
+            if [ "$CURRENT" != "$REMOTE_URL" ]; then
+              git remote set-url origin "$REMOTE_URL"
+            fi
+            git fetch origin
+          fi
+
+          cd "$HOME/node-riscv"
+          git checkout "$commit"
+          echo "HEAD: $(git log --oneline -1)"
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          cd "$HOME/node-riscv"
+
+          case "$compiler" in
+            clang) export CC=clang CXX=clang++ ;;
+            gcc)   export CC=gcc   CXX=g++     ;;
+            *) echo "::error::Unexpected compiler: $compiler"; exit 1 ;;
+          esac
+
+          ./configure
+          make -j"$(nproc)"
+
+  test:
+    needs: [prepare, build]
+    runs-on: rvv-incapable
+    steps:
+      - name: Test
+        run: |
+          set -euo pipefail
+          cd "$HOME/node-riscv"
+          make test-ci
+
+  upload:
+    needs: [prepare, build]
+    runs-on: rvv-incapable
+    env:
+      commit: ${{ needs.prepare.outputs.commit }}
+    steps:
+      - name: Package and upload artifacts
+        run: |
+          set -euo pipefail
+          cd "$HOME/node-riscv"
+
+          ARTIFACT_NAME="node-riscv64-${commit:0:10}"
+          STAGING="/tmp/${ARTIFACT_NAME}"
+          rm -rf "$STAGING"
+          mkdir -p "$STAGING"
+
+          cp out/Release/node "$STAGING/"
+          for f in mksnapshot node_mksnapshot; do
+            [ -f "out/Release/$f" ] && cp "out/Release/$f" "$STAGING/"
+          done
+
+          tar czf "/tmp/${ARTIFACT_NAME}.tar.gz" -C /tmp "$ARTIFACT_NAME"
+          FILE="/tmp/${ARTIFACT_NAME}.tar.gz"
+          SIZE=$(stat -c%s "$FILE")
+          echo "Packaged: ${ARTIFACT_NAME}.tar.gz ($SIZE bytes)"
+
+          # Upload using the Actions pipeline artifacts API
+          if [ -z "${ACTIONS_RUNTIME_URL:-}" ] || [ -z "${ACTIONS_RUNTIME_TOKEN:-}" ]; then
+            echo "::warning::Artifact upload API not available, skipping upload"
+            echo "Binaries available at: $HOME/node-riscv/out/Release/"
+            exit 0
+          fi
+
+          API="${ACTIONS_RUNTIME_URL}_apis/pipelines/workflows/${GITHUB_RUN_ID}/artifacts?api-version=6.0-preview"
+
+          CONTAINER=$(curl -sSf -X POST "$API" \
+            -H "Authorization: Bearer $ACTIONS_RUNTIME_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"type\":\"actions_storage\",\"name\":\"${ARTIFACT_NAME}\"}")
+
+          UPLOAD_URL=$(echo "$CONTAINER" | python3 -c "import sys,json; print(json.load(sys.stdin)['fileContainerResourceUrl'])")
+
+          curl -sSf -X PUT \
+            "${UPLOAD_URL}?itemPath=${ARTIFACT_NAME}/${ARTIFACT_NAME}.tar.gz" \
+            -H "Authorization: Bearer $ACTIONS_RUNTIME_TOKEN" \
+            -H "Content-Type: application/gzip" \
+            -H "Content-Length: $SIZE" \
+            -H "Content-Range: bytes 0-$((SIZE - 1))/$SIZE" \
+            --data-binary @"$FILE"
+
+          curl -sSf -X PATCH "$API" \
+            -H "Authorization: Bearer $ACTIONS_RUNTIME_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"size\":$SIZE}"
+
+          echo "Uploaded artifact: $ARTIFACT_NAME"
