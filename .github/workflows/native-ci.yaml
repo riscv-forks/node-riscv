@@ -128,12 +128,18 @@ jobs:
     needs: prepare
     # Currently runs on SG2042
     runs-on: rvv-incapable
+    outputs:
+      runner: ${{ steps.runner.outputs.name }}
     env:
       repo: ${{ needs.prepare.outputs.repo }}
       commit: ${{ needs.prepare.outputs.commit }}
       compiler: ${{ needs.prepare.outputs.compiler }}
       jobs: ${{ needs.prepare.outputs.jobs }}
     steps:
+      - name: Record runner name
+        id: runner
+        run: echo "name=$RUNNER_NAME" >> "$GITHUB_OUTPUT"
+
       - name: Prepare source tree
         run: |
           set -euo pipefail
@@ -187,7 +193,7 @@ jobs:
 
   test:
     needs: [prepare, build]
-    runs-on: rvv-incapable
+    runs-on: ${{ needs.build.outputs.runner }}
     steps:
       - name: Test
         env:
@@ -199,7 +205,7 @@ jobs:
 
   upload:
     needs: [prepare, build]
-    runs-on: rvv-incapable
+    runs-on: ${{ needs.build.outputs.runner }}
     env:
       commit: ${{ needs.prepare.outputs.commit }}
     steps:
