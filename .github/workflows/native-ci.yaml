@@ -20,6 +20,9 @@ on:
         options:
           - clang
           - gcc
+      jobs:
+        description: 'Number of parallel jobs for make'
+        default: '48'
 
 permissions:
   contents: read
@@ -31,6 +34,7 @@ jobs:
       repo: ${{ steps.config.outputs.repo }}
       commit: ${{ steps.config.outputs.commit }}
       compiler: ${{ steps.config.outputs.compiler }}
+      jobs: ${{ steps.config.outputs.jobs }}
     steps:
       - name: Read build configuration
         id: config
@@ -42,6 +46,7 @@ jobs:
           INPUT_REPO: ${{ inputs.repo }}
           INPUT_COMMIT: ${{ inputs.commit }}
           INPUT_COMPILER: ${{ inputs.compiler }}
+          INPUT_JOBS: ${{ inputs.jobs }}
         run: |
           set -euo pipefail
 
@@ -55,14 +60,17 @@ jobs:
             REPO=$(grep '^repo=' /tmp/build-config | cut -d= -f2- | tr -d '[:space:]' || true)
             COMMIT=$(grep '^commit=' /tmp/build-config | cut -d= -f2- | tr -d '[:space:]' || true)
             COMPILER=$(grep '^compiler=' /tmp/build-config | cut -d= -f2- | tr -d '[:space:]' || true)
+            JOBS=$(grep '^jobs=' /tmp/build-config | cut -d= -f2- | tr -d '[:space:]' || true)
           else
             REPO="$INPUT_REPO"
             COMMIT="$INPUT_COMMIT"
             COMPILER="$INPUT_COMPILER"
+            JOBS="$INPUT_JOBS"
           fi
 
           REPO="${REPO:-nodejs/node}"
           COMPILER="${COMPILER:-clang}"
+          JOBS="${JOBS:-48}"
 
           # Validate repo format
           if ! printf '%s' "$REPO" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9-]*/[a-zA-Z0-9][a-zA-Z0-9._-]*$'; then
@@ -95,9 +103,16 @@ jobs:
             *) echo "::error::compiler must be 'clang' or 'gcc', got: $COMPILER"; exit 1 ;;
           esac
 
+          # Validate jobs is a positive integer
+          if ! printf '%s' "$JOBS" | grep -qE '^[1-9][0-9]*$'; then
+            echo "::error::jobs must be a positive integer, got: $JOBS"
+            exit 1
+          fi
+
           echo "repo=$REPO" >> "$GITHUB_OUTPUT"
           echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
           echo "compiler=$COMPILER" >> "$GITHUB_OUTPUT"
+          echo "jobs=$JOBS" >> "$GITHUB_OUTPUT"
 
           {
             echo "## Build Configuration"
@@ -106,6 +121,7 @@ jobs:
             echo "| Repo | \`$REPO\` |"
             echo "| Commit | \`$COMMIT\` |"
             echo "| Compiler | \`$COMPILER\` |"
+            echo "| Jobs | \`$JOBS\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   build:
@@ -116,6 +132,7 @@ jobs:
       repo: ${{ needs.prepare.outputs.repo }}
       commit: ${{ needs.prepare.outputs.commit }}
       compiler: ${{ needs.prepare.outputs.compiler }}
+      jobs: ${{ needs.prepare.outputs.jobs }}
     steps:
       - name: Prepare source tree
         run: |
@@ -139,6 +156,21 @@ jobs:
           git checkout "$commit"
           echo "HEAD: $(git log --oneline -1)"
 
+      - name: Apply patches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cd "$HOME/node-riscv"
+          PATCH_URL="https://raw.githubusercontent.com/${REPOSITORY}/main/patches/hwy-broken-rvv.diff"
+          if curl -sSf -H "Authorization: token $GH_TOKEN" "$PATCH_URL" | git apply --check 2>/dev/null; then
+            curl -sSf -H "Authorization: token $GH_TOKEN" "$PATCH_URL" | git apply
+            echo "Applied hwy-broken-rvv.diff"
+          else
+            echo "Patch already applied or not applicable, skipping"
+          fi
+
       - name: Build
         run: |
           set -euo pipefail
@@ -151,17 +183,19 @@ jobs:
           esac
 
           ./configure
-          make -j"$(nproc)"
+          make -j"$jobs"
 
   test:
     needs: [prepare, build]
     runs-on: rvv-incapable
     steps:
       - name: Test
+        env:
+          jobs: ${{ needs.prepare.outputs.jobs }}
         run: |
           set -euo pipefail
           cd "$HOME/node-riscv"
-          make test-ci
+          make -j"$jobs" test-ci
 
   upload:
     needs: [prepare, build]
