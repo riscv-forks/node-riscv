@@ -182,7 +182,7 @@ jobs:
             *) echo "::error::Unexpected compiler: $compiler"; exit 1 ;;
           esac
 
-          ./configure
+          ./configure --shared-openssl --dest-cpu=riscv64
           make -j"$jobs"
 
   test:
