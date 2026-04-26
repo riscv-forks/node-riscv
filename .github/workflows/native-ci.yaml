@@ -183,8 +183,8 @@ jobs:
           cd "$HOME/node-riscv"
 
           case "$compiler" in
-            clang) export CC=clang CXX=clang++ ;;
-            gcc)   export CC=gcc   CXX=g++     ;;
+            clang) export CC='ccache clang' CXX='ccache clang++' ;;
+            gcc)   export CC='ccache gcc'   CXX='ccache g++'     ;;
             *) echo "::error::Unexpected compiler: $compiler"; exit 1 ;;
           esac
 
