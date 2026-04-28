@@ -201,7 +201,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "$HOME/node-riscv"
-          make -j"$jobs" test-ci
+          make -j"$jobs" test-only
 
   upload:
     needs: [prepare, build]
