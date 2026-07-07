@@ -117,7 +117,7 @@ jobs:
             echo "| Artifact | \`$ARTIFACT_NAME\` |"
             echo "| Sysroot | \`debian_trixie_riscv64_sysroot\` |"
             echo "| Compiler | \`clang\` |"
-            echo "| Build system | \`ninja\` |"
+            echo "| Build system | \`make\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install build dependencies
@@ -132,7 +132,6 @@ jobs:
             lld \
             llvm \
             make \
-            ninja-build \
             python3 \
             xz-utils
 
@@ -224,7 +223,7 @@ jobs:
           make -j"$JOBS" binary \
             DESTCPU=riscv64 \
             VARIATION="local${LOCAL_REVISION}" \
-            CONFIG_FLAGS="--cross-compiling --dest-os=linux --ninja --use_clang"
+            CONFIG_FLAGS="--cross-compiling --dest-os=linux --use_clang"
 
           ls -lh node-v*-linux-riscv64-local"${LOCAL_REVISION}".tar.*
 
@@ -291,7 +290,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
               --title "Node.js ${NODE_TAG} riscv64 local ${LOCAL_REVISION}" \
-              --notes "Cross-compiled Node.js ${NODE_TAG} for linux-riscv64 using Chromium debian_trixie_riscv64_sysroot, clang, and ninja. Local build revision: ${LOCAL_REVISION}."
+              --notes "Cross-compiled Node.js ${NODE_TAG} for linux-riscv64 using Chromium debian_trixie_riscv64_sysroot and clang. Local build revision: ${LOCAL_REVISION}."
           fi
 
           gh release upload "$RELEASE_TAG" "${ASSETS[@]}" --repo "$GITHUB_REPOSITORY" --clobber

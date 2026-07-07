@@ -61,8 +61,8 @@ For release publishing, run the same workflow manually from GitHub Actions with:
 Manual builds upload the artifact and then publish the same files to this
 repository's GitHub Releases.
 
-The workflow uses Chromium's `debian_trixie_riscv64_sysroot`, clang target
-compilers, and Ninja. It applies every `.patch` and `.diff` file in
+The workflow uses Chromium's `debian_trixie_riscv64_sysroot` and clang target
+compilers. It applies every `.patch` and `.diff` file in
 `v24-patches/` before building.
 
 For `tag=v24.4.0` and `local_revision=1`, the GitHub release tag is
