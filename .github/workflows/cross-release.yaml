@@ -186,6 +186,14 @@ jobs:
             git apply "$patch"
           done < /tmp/node-v24-patches
 
+          if [ -n "$(git status --porcelain | grep -v '^\?\? ' || true)" ]; then
+            git config user.name "node-riscv CI"
+            git config user.email "node-riscv-ci@example.invalid"
+            git add -u
+            git commit -m "Apply node-riscv v24 patches"
+            echo "Patch commit: $(git rev-parse HEAD)"
+          fi
+
       - name: Cross-compile release tarball
         env:
           JOBS: ${{ steps.config.outputs.jobs }}
