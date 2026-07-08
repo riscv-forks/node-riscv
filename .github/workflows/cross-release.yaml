@@ -223,7 +223,7 @@ jobs:
           make -j"$JOBS" binary \
             DESTCPU=riscv64 \
             VARIATION="local${LOCAL_REVISION}" \
-            CONFIG_FLAGS="--cross-compiling --dest-os=linux --use_clang --dest-cpu=riscv64"
+            CONFIG_FLAGS="--cross-compiling --dest-os=linux --use_clang --dest-cpu=riscv64 --openssl-no-asm"
 
           ls -lh node-v*-linux-riscv64-local"${LOCAL_REVISION}".tar.*
 
