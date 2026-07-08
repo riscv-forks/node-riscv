@@ -1,0 +1,314 @@
+name: Cross RISC-V Build
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - cross-build-config
+      - v24-patches/**
+      - .github/workflows/cross-release.yaml
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Node.js release tag to build, for example v24.4.0'
+        required: true
+      local_revision:
+        description: 'Local build revision number'
+        required: true
+        default: '1'
+      jobs:
+        description: 'Number of parallel build jobs, empty = nproc'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      artifact_name: ${{ steps.config.outputs.artifact_name }}
+      local_revision: ${{ steps.config.outputs.local_revision }}
+      node_tag: ${{ steps.config.outputs.node_tag }}
+      release_tag: ${{ steps.config.outputs.release_tag }}
+    env:
+      LLVM_VERSION: '22'
+      NODE_REPO: nodejs/node
+      TARGET_TRIPLE: riscv64-linux-gnu
+      SYSROOT_DIR: ${{ github.workspace }}/chromium-sysroot/build/linux/debian_trixie_riscv64-sysroot
+    steps:
+      - name: Checkout workflow repository
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          WORKFLOW_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          git clone --no-checkout "https://github.com/${GITHUB_REPOSITORY}.git" workflow-repo
+          cd workflow-repo
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git fetch --depth 1 origin "refs/pull/${PR_NUMBER}/merge"
+            git checkout --detach FETCH_HEAD
+          else
+            git fetch --depth 1 origin "$WORKFLOW_REF"
+            git checkout --detach FETCH_HEAD
+          fi
+
+      - name: Read and validate build configuration
+        id: config
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_LOCAL_REVISION: ${{ inputs.local_revision }}
+          INPUT_JOBS: ${{ inputs.jobs }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            CONFIG_FILE="$GITHUB_WORKSPACE/workflow-repo/cross-build-config"
+            if [ ! -f "$CONFIG_FILE" ]; then
+              echo "::error::cross-build-config is required for pull request builds"
+              exit 1
+            fi
+
+            INPUT_TAG=$(grep '^tag=' "$CONFIG_FILE" | cut -d= -f2- | tr -d '[:space:]' || true)
+            INPUT_LOCAL_REVISION=$(grep '^local_revision=' "$CONFIG_FILE" | cut -d= -f2- | tr -d '[:space:]' || true)
+            INPUT_JOBS=$(grep '^jobs=' "$CONFIG_FILE" | cut -d= -f2- | tr -d '[:space:]' || true)
+          fi
+
+          INPUT_LOCAL_REVISION="${INPUT_LOCAL_REVISION:-1}"
+          if [ -z "$INPUT_JOBS" ]; then
+            INPUT_JOBS=$(nproc)
+          fi
+
+          if ! printf '%s' "$INPUT_TAG" | grep -qE '^v24\.[0-9]+\.[0-9]+([.-][0-9A-Za-z][0-9A-Za-z._-]*)?$'; then
+            echo "::error::tag must be a Node.js v24 release tag such as v24.4.0, got: $INPUT_TAG"
+            exit 1
+          fi
+
+          if ! printf '%s' "$INPUT_LOCAL_REVISION" | grep -qE '^[1-9][0-9]*$'; then
+            echo "::error::local_revision must be a positive integer, got: $INPUT_LOCAL_REVISION"
+            exit 1
+          fi
+
+          if ! printf '%s' "$INPUT_JOBS" | grep -qE '^[1-9][0-9]*$'; then
+            echo "::error::jobs must be a positive integer, got: $INPUT_JOBS"
+            exit 1
+          fi
+
+          RELEASE_TAG="${INPUT_TAG}-riscv64.${INPUT_LOCAL_REVISION}"
+          ARTIFACT_NAME="node-${INPUT_TAG}-linux-riscv64-local${INPUT_LOCAL_REVISION}"
+          echo "node_tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
+          echo "local_revision=$INPUT_LOCAL_REVISION" >> "$GITHUB_OUTPUT"
+          echo "jobs=$INPUT_JOBS" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Cross build"
+            echo "| Key | Value |"
+            echo "|-----|-------|"
+            echo "| Event | \`$EVENT_NAME\` |"
+            echo "| Node tag | \`$INPUT_TAG\` |"
+            echo "| Local revision | \`$INPUT_LOCAL_REVISION\` |"
+            echo "| Release tag | \`$RELEASE_TAG\` |"
+            echo "| Artifact | \`$ARTIFACT_NAME\` |"
+            echo "| Sysroot | \`debian_trixie_riscv64_sysroot\` |"
+            echo "| Compiler | \`clang-$LLVM_VERSION\` |"
+            echo "| Build system | \`make\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates \
+            curl \
+            gnupg \
+            git \
+            lsb-release \
+            make \
+            python3 \
+            wget \
+            xz-utils
+
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh "$LLVM_VERSION"
+          sudo apt-get install -y --no-install-recommends \
+            clang-"$LLVM_VERSION" \
+            lld-"$LLVM_VERSION" \
+            llvm-"$LLVM_VERSION"
+
+          clang-"$LLVM_VERSION" --version
+          ld.lld-"$LLVM_VERSION" --version
+
+      - name: Download Chromium riscv64 sysroot
+        run: |
+          set -euo pipefail
+
+          mkdir -p chromium-sysroot/build/linux/sysroot_scripts
+          curl -fsSL \
+            "https://chromium.googlesource.com/chromium/src/+/refs/heads/main/build/linux/sysroot_scripts/install-sysroot.py?format=TEXT" \
+            | base64 -d > chromium-sysroot/build/linux/sysroot_scripts/install-sysroot.py
+          curl -fsSL \
+            "https://chromium.googlesource.com/chromium/src/+/refs/heads/main/build/linux/sysroot_scripts/sysroots.json?format=TEXT" \
+            | base64 -d > chromium-sysroot/build/linux/sysroot_scripts/sysroots.json
+
+          python3 chromium-sysroot/build/linux/sysroot_scripts/install-sysroot.py --arch=riscv64
+
+          test -d "$SYSROOT_DIR"
+          test -e "$SYSROOT_DIR/lib"
+          echo "Installed sysroot: $SYSROOT_DIR"
+
+      - name: Checkout Node.js release tag
+        env:
+          NODE_TAG: ${{ steps.config.outputs.node_tag }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$NODE_TAG" "https://github.com/${NODE_REPO}.git" node
+          cd node
+          echo "HEAD: $(git log --oneline -1)"
+
+      - name: Apply v24 patches
+        run: |
+          set -euo pipefail
+          cd node
+
+          PATCH_DIR="$GITHUB_WORKSPACE/workflow-repo/v24-patches"
+          if [ ! -d "$PATCH_DIR" ]; then
+            echo "::error::Patch directory not found: $PATCH_DIR"
+            exit 1
+          fi
+
+          find "$PATCH_DIR" -maxdepth 1 -type f \( -name '*.patch' -o -name '*.diff' \) | sort > /tmp/node-v24-patches
+          if [ ! -s /tmp/node-v24-patches ]; then
+            echo "::error::No .patch or .diff files found in $PATCH_DIR"
+            exit 1
+          fi
+
+          while IFS= read -r patch; do
+            echo "Applying ${patch##*/}"
+            git apply --check "$patch"
+            git apply "$patch"
+          done < /tmp/node-v24-patches
+
+          if [ -n "$(git status --porcelain | grep -v '^?? ' || true)" ]; then
+            git config user.name "node-riscv CI"
+            git config user.email "node-riscv-ci@example.invalid"
+            git add -u
+            git commit -m "Apply node-riscv v24 patches"
+            echo "Patch commit: $(git rev-parse HEAD)"
+          fi
+
+      - name: Cross-compile release tarball
+        env:
+          JOBS: ${{ steps.config.outputs.jobs }}
+          LOCAL_REVISION: ${{ steps.config.outputs.local_revision }}
+        run: |
+          set -euo pipefail
+          cd node
+
+          CLANG="clang-${LLVM_VERSION}"
+          CLANGXX="clang++-${LLVM_VERSION}"
+          LLVM_AR="llvm-ar-${LLVM_VERSION}"
+          LLVM_RANLIB="llvm-ranlib-${LLVM_VERSION}"
+          LLVM_STRIP="llvm-strip-${LLVM_VERSION}"
+
+          export CC_host="$CLANG"
+          export CXX_host="$CLANGXX"
+          export LINK_host="$CLANGXX"
+          export AR_host="$LLVM_AR"
+
+          TARGET_CC="$CLANG --target=${TARGET_TRIPLE} --sysroot=${SYSROOT_DIR}"
+          TARGET_CXX="$CLANGXX --target=${TARGET_TRIPLE} --sysroot=${SYSROOT_DIR}"
+          TARGET_LINK="${TARGET_CXX} -fuse-ld=lld"
+
+          export CC_target="$TARGET_CC"
+          export CXX_target="$TARGET_CXX"
+          export LINK_target="$TARGET_LINK"
+          export AR_target="$LLVM_AR"
+          export RANLIB_target="$LLVM_RANLIB"
+          export STRIP="$LLVM_STRIP"
+
+          export PKG_CONFIG_LIBDIR="${SYSROOT_DIR}/usr/lib/${TARGET_TRIPLE}/pkgconfig:${SYSROOT_DIR}/usr/lib/pkgconfig:${SYSROOT_DIR}/usr/share/pkgconfig"
+          export PKG_CONFIG_SYSROOT_DIR="$SYSROOT_DIR"
+
+          make -j"$JOBS" binary \
+            DESTCPU=riscv64 \
+            VARIATION="local${LOCAL_REVISION}" \
+            CONFIG_FLAGS="--cross-compiling --dest-os=linux --use_clang --dest-cpu=riscv64 --openssl-no-asm"
+
+          ls -lh node-v*-linux-riscv64-local"${LOCAL_REVISION}".tar.*
+
+      - name: Collect build artifacts
+        env:
+          LOCAL_REVISION: ${{ steps.config.outputs.local_revision }}
+        run: |
+          set -euo pipefail
+          cd node
+
+          shopt -s nullglob
+          ASSETS=(node-v*-linux-riscv64-local"${LOCAL_REVISION}".tar.gz node-v*-linux-riscv64-local"${LOCAL_REVISION}".tar.xz)
+          if [ "${#ASSETS[@]}" -eq 0 ]; then
+            echo "::error::No release tarballs found"
+            exit 1
+          fi
+
+          sha256sum "${ASSETS[@]}" > SHASUMS256.txt
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp "${ASSETS[@]}" SHASUMS256.txt "$GITHUB_WORKSPACE/dist/"
+          ls -lh "$GITHUB_WORKSPACE/dist"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.config.outputs.artifact_name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: dist
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NODE_TAG: ${{ needs.build.outputs.node_tag }}
+          LOCAL_REVISION: ${{ needs.build.outputs.local_revision }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          cd dist
+
+          shopt -s nullglob
+          ASSETS=(node-v*-linux-riscv64-local*.tar.gz node-v*-linux-riscv64-local*.tar.xz SHASUMS256.txt)
+          if [ "${#ASSETS[@]}" -eq 0 ]; then
+            echo "::error::No release artifacts found"
+            exit 1
+          fi
+
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists"
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Node.js ${NODE_TAG} riscv64 local ${LOCAL_REVISION}" \
+              --notes "Cross-compiled Node.js ${NODE_TAG} for linux-riscv64 using Chromium debian_trixie_riscv64_sysroot and clang. Local build revision: ${LOCAL_REVISION}."
+          fi
+
+          gh release upload "$RELEASE_TAG" "${ASSETS[@]}" --repo "$GITHUB_REPOSITORY" --clobber
