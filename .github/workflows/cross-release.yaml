@@ -34,6 +34,7 @@ jobs:
       node_tag: ${{ steps.config.outputs.node_tag }}
       release_tag: ${{ steps.config.outputs.release_tag }}
     env:
+      LLVM_VERSION: '22'
       NODE_REPO: nodejs/node
       TARGET_TRIPLE: riscv64-linux-gnu
       SYSROOT_DIR: ${{ github.workspace }}/chromium-sysroot/build/linux/debian_trixie_riscv64-sysroot
@@ -116,7 +117,7 @@ jobs:
             echo "| Release tag | \`$RELEASE_TAG\` |"
             echo "| Artifact | \`$ARTIFACT_NAME\` |"
             echo "| Sysroot | \`debian_trixie_riscv64_sysroot\` |"
-            echo "| Compiler | \`clang\` |"
+            echo "| Compiler | \`clang-$LLVM_VERSION\` |"
             echo "| Build system | \`make\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -126,14 +127,25 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             ca-certificates \
-            clang \
             curl \
+            gnupg \
             git \
-            lld \
-            llvm \
+            lsb-release \
             make \
             python3 \
+            wget \
             xz-utils
+
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh "$LLVM_VERSION"
+          sudo apt-get install -y --no-install-recommends \
+            clang-"$LLVM_VERSION" \
+            lld-"$LLVM_VERSION" \
+            llvm-"$LLVM_VERSION"
+
+          clang-"$LLVM_VERSION" --version
+          ld.lld-"$LLVM_VERSION" --version
 
       - name: Download Chromium riscv64 sysroot
         run: |
@@ -201,21 +213,27 @@ jobs:
           set -euo pipefail
           cd node
 
-          export CC_host=clang
-          export CXX_host=clang++
-          export LINK_host=clang++
-          export AR_host=llvm-ar
+          CLANG="clang-${LLVM_VERSION}"
+          CLANGXX="clang++-${LLVM_VERSION}"
+          LLVM_AR="llvm-ar-${LLVM_VERSION}"
+          LLVM_RANLIB="llvm-ranlib-${LLVM_VERSION}"
+          LLVM_STRIP="llvm-strip-${LLVM_VERSION}"
 
-          TARGET_CC="clang --target=${TARGET_TRIPLE} --sysroot=${SYSROOT_DIR}"
-          TARGET_CXX="clang++ --target=${TARGET_TRIPLE} --sysroot=${SYSROOT_DIR}"
+          export CC_host="$CLANG"
+          export CXX_host="$CLANGXX"
+          export LINK_host="$CLANGXX"
+          export AR_host="$LLVM_AR"
+
+          TARGET_CC="$CLANG --target=${TARGET_TRIPLE} --sysroot=${SYSROOT_DIR}"
+          TARGET_CXX="$CLANGXX --target=${TARGET_TRIPLE} --sysroot=${SYSROOT_DIR}"
           TARGET_LINK="${TARGET_CXX} -fuse-ld=lld"
 
           export CC_target="$TARGET_CC"
           export CXX_target="$TARGET_CXX"
           export LINK_target="$TARGET_LINK"
-          export AR_target=llvm-ar
-          export RANLIB_target=llvm-ranlib
-          export STRIP=llvm-strip
+          export AR_target="$LLVM_AR"
+          export RANLIB_target="$LLVM_RANLIB"
+          export STRIP="$LLVM_STRIP"
 
           export PKG_CONFIG_LIBDIR="${SYSROOT_DIR}/usr/lib/${TARGET_TRIPLE}/pkgconfig:${SYSROOT_DIR}/usr/lib/pkgconfig:${SYSROOT_DIR}/usr/share/pkgconfig"
           export PKG_CONFIG_SYSROOT_DIR="$SYSROOT_DIR"
